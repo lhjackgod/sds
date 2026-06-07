@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+outputs/*
+!outputs/.gitkeep
+
+data/smplx/source/*
+data/smplx/generated/*

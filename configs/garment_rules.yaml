@@ -1,0 +1,8 @@
+body_up_axis: y
+include_neck_for_vest: false
+postprocess:
+  close_kernel: 3
+  min_component_area: 16
+  boundary_kernel: 7
+  soft_blur_sigma: 2.0
+
