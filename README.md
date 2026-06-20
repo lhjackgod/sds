@@ -124,6 +124,79 @@ left_foot right_foot
 Shorts use the upper half of thigh vertices. Configure the body vertical axis
 in `configs/garment_rules.yaml` when the template does not use Y-up.
 
+
+## Phase 2: SO-SMPL-inspired Bounded Garment Offset
+
+Phase 2 borrows the SO-SMPL idea of freezing the human body and representing
+body-aligned clothing as a bounded shell. In this project the shell is a scalar
+normal offset sampled from a UV offset map:
+
+```text
+v_offset = v_body + s(v) * normal(v)
+```
+
+The offset is restricted by Phase 1 garment masks, max-thickness rules, smoothing,
+and fixed zero regions. It is a garment structure prior for later CasTex or
+text-to-texture, not a true separated garment reconstruction.
+
+Limitations:
+
+```text
+- only body-aligned garments are supported
+- offset is bounded normal offset, not arbitrary XYZ displacement
+- skirt, dress, open jacket, cape, scarf are not supported
+- head, hands, feet, and skin remain fixed at zero offset
+- SDS refinement is optional and constrained by masks and max offset
+- without diffusion dependencies, mode=init and --sds-mode dummy still run
+```
+
+Generate only rule-initialized offset:
+
+```bash
+/root/miniconda3/envs/castex/bin/python src/main_generate_offset.py \
+  --prompt "a person wearing a red short sleeve T-shirt and blue jeans" \
+  --mesh data/smplx/generated/smplx_template.obj \
+  --part-labels data/smplx/generated/part_labels.json \
+  --mask-dir outputs/masks/prompt_batch_512/01_a_person_wearing_a_red_short_sleeve_t_shirt_and_blue_jeans \
+  --out outputs/offset/test_tshirt_jeans_init \
+  --mode init
+```
+
+Run the SDS refinement scaffold with dummy guidance:
+
+```bash
+/root/miniconda3/envs/castex/bin/python src/main_generate_offset.py \
+  --prompt "a person wearing a loose white hoodie and dark blue jeans" \
+  --mesh data/smplx/generated/smplx_template.obj \
+  --part-labels data/smplx/generated/part_labels.json \
+  --mask-dir outputs/masks/prompt_batch_512/04_a_person_wearing_a_white_hoodie_and_dark_jeans \
+  --out outputs/offset/test_hoodie_jeans_dummy_sds \
+  --mode sds \
+  --optimize-mode part_scale \
+  --steps 300 \
+  --sds-mode dummy
+```
+
+Each offset run writes:
+
+```text
+offset_mesh.obj
+offset_scale.npy
+offset_scale_uv.png
+offset_debug_texture.png
+offset_vertex_colors.ply
+render_body_front.png
+render_offset_front.png
+render_normal_front.png
+render_silhouette_front.png
+optimization_log.json
+```
+
+`offset_scale_uv.png` is the scalar offset map visualized in UV space.
+`offset_vertex_colors.ply` shows upper/lower/skin vertices with brightness
+modulated by offset strength. `optimization_log.json` records the prompt,
+GarmentSpec, mode, loss curves, final offset statistics, and part scale metadata.
+
 ## Test
 
 ```bash

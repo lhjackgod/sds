@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 from PIL import Image
+import numpy as np
 
 from debug_render import save_debug_assets
 from load_smplx import load_part_labels, load_smplx
@@ -15,6 +16,17 @@ from mask_postprocess import ProcessedMasks, postprocess_masks
 from parse_prompt import parse_prompt
 from part_mapping import build_vertex_masks
 from uv_rasterizer import rasterize_vertex_masks_to_uv
+
+
+def _save_vertex_masks(vertex_masks, out_dir: Path) -> None:
+    np.save(out_dir / "vertex_upper_mask.npy", vertex_masks.upper.astype(bool))
+    np.save(out_dir / "vertex_lower_mask.npy", vertex_masks.lower.astype(bool))
+    np.save(out_dir / "vertex_skin_mask.npy", vertex_masks.skin.astype(bool))
+    labels = np.zeros(len(vertex_masks.skin), dtype=np.uint8)
+    labels[vertex_masks.skin] = 1
+    labels[vertex_masks.upper] = 2
+    labels[vertex_masks.lower] = 3
+    np.save(out_dir / "vertex_region_labels.npy", labels)
 
 
 def _save_masks(masks: ProcessedMasks, out_dir: Path) -> None:
@@ -58,6 +70,7 @@ def generate_masks(args: argparse.Namespace) -> None:
     )
     masks = postprocess_masks(uv_masks, **postprocess_config)
     _save_masks(masks, out_dir)
+    _save_vertex_masks(vertex_masks, out_dir)
     save_debug_assets(mesh, masks, out_dir, vertex_masks=vertex_masks, raw_uv_masks=uv_masks)
     with (out_dir / "garment_spec.json").open("w", encoding="utf-8") as handle:
         json.dump(spec, handle, indent=2)

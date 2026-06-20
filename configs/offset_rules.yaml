@@ -1,0 +1,78 @@
+# Phase 2 bounded normal-offset rules. Units assume SMPL-X meters.
+upper:
+  vest:
+    torso: 0.010
+    neck: 0.004
+  tshirt:
+    torso: 0.012
+    left_upper_arm: 0.010
+    right_upper_arm: 0.010
+  shirt:
+    torso: 0.012
+    left_upper_arm: 0.010
+    right_upper_arm: 0.010
+    left_forearm: 0.008
+    right_forearm: 0.008
+  sweater:
+    torso: 0.018
+    left_upper_arm: 0.015
+    right_upper_arm: 0.015
+    left_forearm: 0.012
+    right_forearm: 0.012
+  hoodie:
+    torso: 0.022
+    left_upper_arm: 0.018
+    right_upper_arm: 0.018
+    left_forearm: 0.014
+    right_forearm: 0.014
+    neck: 0.008
+lower:
+  shorts:
+    pelvis: 0.010
+    left_thigh: 0.010
+    right_thigh: 0.010
+  pants:
+    pelvis: 0.010
+    left_thigh: 0.010
+    right_thigh: 0.010
+    left_calf: 0.008
+    right_calf: 0.008
+  jeans:
+    pelvis: 0.012
+    left_thigh: 0.010
+    right_thigh: 0.010
+    left_calf: 0.008
+    right_calf: 0.008
+  leggings:
+    pelvis: 0.005
+    left_thigh: 0.005
+    right_thigh: 0.005
+    left_calf: 0.004
+    right_calf: 0.004
+fit_multiplier:
+  tight: 0.6
+  normal: 1.0
+  loose: 1.25
+max_offset:
+  torso: 0.035
+  left_upper_arm: 0.025
+  right_upper_arm: 0.025
+  left_forearm: 0.020
+  right_forearm: 0.020
+  pelvis: 0.025
+  left_thigh: 0.020
+  right_thigh: 0.020
+  left_calf: 0.018
+  right_calf: 0.018
+  neck: 0.012
+  head: 0.0
+  left_hand: 0.0
+  right_hand: 0.0
+  left_foot: 0.0
+  right_foot: 0.0
+fixed_zero_labels:
+  - head
+  - left_hand
+  - right_hand
+  - left_foot
+  - right_foot
