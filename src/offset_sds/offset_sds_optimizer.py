@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
 from castex_bridge.camera_bridge import fixed_cameras, random_cameras
@@ -43,10 +42,24 @@ def _to_image(tensor: torch.Tensor) -> np.ndarray:
     return (image.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
 
 
-def _save_debug(out_dir: Path, step: int, shaded: torch.Tensor, normal: torch.Tensor, silhouette: torch.Tensor, offset_uv: torch.Tensor) -> None:
-    Image.fromarray(_to_image(shaded)).save(out_dir / f"step_{step:04d}_shaded.png")
-    Image.fromarray(_to_image(normal)).save(out_dir / f"step_{step:04d}_normal.png")
-    Image.fromarray(_to_image(silhouette)).save(out_dir / f"step_{step:04d}_silhouette.png")
+def _save_debug(
+    out_dir: Path,
+    step: int,
+    renderer,
+    vertices_offset: torch.Tensor,
+    offset_uv: torch.Tensor,
+    render_resolution: int,
+    device: str,
+    vertex_colors=None,
+) -> None:
+    debug_cams = fixed_cameras(("front", "left", "back"), render_resolution, device)
+    with torch.no_grad():
+        render_out = renderer.render(vertices_offset.detach(), vertex_colors=vertex_colors, cameras=debug_cams)
+    names = ("front", "side", "back")
+    for index, name in enumerate(names):
+        Image.fromarray(_to_image(render_out["shaded"][index : index + 1])).save(out_dir / f"step_{step:04d}_{name}_shaded.png")
+    Image.fromarray(_to_image(render_out["normal"][0:1])).save(out_dir / f"step_{step:04d}_front_normal.png")
+    Image.fromarray(_to_image(render_out["silhouette"][0:1])).save(out_dir / f"step_{step:04d}_front_silhouette.png")
     uv = offset_uv.detach().float().cpu()[0, 0].numpy()
     denom = max(float(uv.max()), 1e-8)
     Image.fromarray(np.clip(uv / denom * 255.0, 0, 255).astype(np.uint8)).save(out_dir / f"step_{step:04d}_offset_uv.png")
@@ -65,7 +78,7 @@ def _part_index(part_labels: list[str], device: str) -> torch.Tensor:
 
 
 def _part_scale_values(raw: torch.Tensor) -> torch.Tensor:
-    return 0.5 + torch.sigmoid(raw) * 1.0
+    return 0.7 + torch.sigmoid(raw) * 0.6
 
 
 def optimize_uv_offset_sds(
@@ -105,7 +118,9 @@ def optimize_uv_offset_sds(
     lambda_lap: float = 0.1,
     lambda_sil: float = 0.0,
     lambda_seam: float = 0.0,
-    lr: float = 0.03,
+    lr: float = 1e-3,
+    vertex_colors=None,
+    fp16: bool = True,
 ) -> OffsetSDSResult:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -120,8 +135,10 @@ def optimize_uv_offset_sds(
     normals_t = torch.as_tensor(vertex_normals, dtype=torch.float32, device=device_obj)
     edges = mesh_edges(faces, device)
 
+    if sds_mode not in {"dummy", "none"} and optimize_mode != "part_scale":
+        raise NotImplementedError("Real SDS is currently enabled only for optimize_mode=part_scale")
     renderer = CasTexOffsetRenderer(faces, uv_coords, face_uv_indices, render_resolution, device)
-    guidance = CasTexSDSGuidance(geometry_prompt, negative_prompt, castex_root, stage=stage, device=device, guidance_scale=guidance_scale, mode=sds_mode)
+    guidance = CasTexSDSGuidance(geometry_prompt, negative_prompt, castex_root, stage=stage, device=device, guidance_scale=guidance_scale, fp16=fp16, mode=sds_mode)
     offset_mesh = DifferentiableOffsetMesh(vertices, faces, vertex_normals, vertex_uvs_per_vertex, fixed_zero_mask, max_vertex_offset, device=device)
 
     curves: dict[str, list[float]] = {
@@ -134,6 +151,8 @@ def optimize_uv_offset_sds(
         "mean_offset": [],
         "max_offset": [],
     }
+    for name in PART_GROUPS:
+        curves[f"scale_{name}"] = []
 
     if optimize_mode == "part_scale":
         raw_scale = torch.nn.Parameter(torch.zeros(len(PART_GROUPS), dtype=torch.float32, device=device_obj))
@@ -172,7 +191,10 @@ def optimize_uv_offset_sds(
             part_scales = None
 
         cams = fixed_cameras(("front",), render_resolution, device) if step == 0 else random_cameras(batch_size, render_resolution, device)
-        shaded, normal, silhouette = renderer.render(vertices_offset, cameras=cams)
+        render_out = renderer.render(vertices_offset, vertex_colors=vertex_colors, cameras=cams)
+        shaded = render_out["shaded"]
+        normal = render_out["normal"]
+        silhouette = render_out["silhouette"]
         loss_sds = guidance.loss(shaded)
         loss_lap = laplacian_offset_loss(scale, edges)
         loss_sil = silhouette.sum() * 0.0
@@ -198,13 +220,16 @@ def optimize_uv_offset_sds(
             ("max_offset", scale.max()),
         ):
             curves[key].append(float(value.detach().cpu()))
+        if optimize_mode == "part_scale":
+            for index, name in enumerate(PART_GROUPS):
+                curves[f"scale_{name}"].append(float(part_scales[index].detach().cpu()))
 
         final_offset_uv = offset_uv.detach()
         final_scale = scale.detach()
         final_vertices = vertices_offset.detach()
 
         if save_interval > 0 and (step % save_interval == 0 or step == steps):
-            _save_debug(out_path, step, shaded, normal, silhouette, offset_uv)
+            _save_debug(out_path, step, renderer, vertices_offset, offset_uv, render_resolution, device, vertex_colors=vertex_colors)
 
         if step == steps:
             break

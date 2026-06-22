@@ -25,8 +25,13 @@ def fixed_cameras(names: tuple[str, ...] = ("front", "back", "left", "right"), r
 
 
 def random_cameras(batch_size: int, resolution: int = 256, device: str = "cuda") -> OrbitCameras:
-    azimuth = torch.rand(batch_size, device=device) * (2.0 * math.pi) - math.pi
-    elevation = (torch.rand(batch_size, device=device) - 0.5) * (math.pi / 6.0)
+    base = torch.tensor([0.0, math.pi, math.pi / 2.0, -math.pi / 2.0], dtype=torch.float32, device=device)
+    choices = torch.randint(0, len(base), (batch_size,), device=device)
+    jitter = (torch.rand(batch_size, device=device) - 0.5) * (math.pi / 12.0)
+    azimuth = base[choices] + jitter
+    min_elev = -10.0 * math.pi / 180.0
+    max_elev = 15.0 * math.pi / 180.0
+    elevation = min_elev + torch.rand(batch_size, device=device) * (max_elev - min_elev)
     distance = torch.full((batch_size,), 2.7, dtype=torch.float32, device=device)
     return OrbitCameras(azimuth=azimuth, elevation=elevation, distance=distance, resolution=resolution)
 

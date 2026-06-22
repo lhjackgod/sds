@@ -19,6 +19,7 @@ class CasTexSDSGuidance:
         guidance_scale: float = 20.0,
         model_i: str = "DeepFloyd/IF-I-XL-v1.0",
         model_ii: str = "DeepFloyd/IF-II-L-v1.0",
+        fp16: bool = True,
         mode: str = "dummy",
     ) -> None:
         self.prompt = prompt
@@ -27,6 +28,7 @@ class CasTexSDSGuidance:
         self.device = device
         self.guidance_scale = guidance_scale
         self.mode = mode
+        self.fp16 = fp16
         self.backend = None
         if stage != "i":
             raise NotImplementedError('Only stage="i" is wired for the first offset SDS pass')
@@ -41,6 +43,9 @@ class CasTexSDSGuidance:
 
             model_name = model_i if stage == "i" else model_ii
             self.backend = SDSLoss(stage=stage, model_name=model_name, device=device)
+            self.backend.eval()
+            for parameter in self.backend.parameters():
+                parameter.requires_grad_(False)
             cache_dir = root / "cached_prompts"
             self.prompt_embeddings = encode_prompt(
                 prompt,
@@ -55,6 +60,7 @@ class CasTexSDSGuidance:
             ) from exc
 
     def loss(self, images: torch.Tensor, view_dirs=None) -> torch.Tensor:
+        images = images.clamp(0.0, 1.0).contiguous()
         if self.backend is not None:
             return self.backend(images, prompt_embeddings=self.prompt_embeddings, guidance_scale=self.guidance_scale)
         # Dummy mode is intentionally non-zero so optimization plumbing can be
