@@ -16,8 +16,8 @@ cd /autodl-fs/data/llmtexture/step2
   --part-labels data/smplx/generated/part_labels.json \
   --mask-dir outputs/masks/prompt_batch_512/04_a_person_wearing_a_white_hoodie_and_dark_jeans \
   --castex-root ../CasTex \
-  --out outputs/offset_sds/hoodie_jeans_sds_part_test \
-  --optimize-mode part_scale \
+  --out outputs/offset_structure/hoodie_jeans_structure_sds \
+  --optimize-mode structure_scale \
   --stage i \
   --steps 100 \
   --batch-size 1 \

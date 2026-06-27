@@ -15,6 +15,8 @@ from castex_bridge.renderer_bridge import CasTexOffsetRenderer
 from offset_sds.offset_losses import laplacian_offset_loss, mask_loss, mesh_edges
 from offset_sds.offset_map_torch import compose_offset_uv_torch, tv_loss
 from offset_sds.offset_mesh_torch import DifferentiableOffsetMesh
+from offset_structure.structured_offset_composer import compose_structured_offset_uv_torch
+from offset_structure.template_bank import COMPONENT_NAMES
 
 
 PART_GROUPS = {
@@ -121,6 +123,8 @@ def optimize_uv_offset_sds(
     lr: float = 1e-3,
     vertex_colors=None,
     fp16: bool = True,
+    structure_component_maps: dict[str, np.ndarray] | None = None,
+    structure_template_weights: dict[str, float] | None = None,
 ) -> OffsetSDSResult:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -135,8 +139,8 @@ def optimize_uv_offset_sds(
     normals_t = torch.as_tensor(vertex_normals, dtype=torch.float32, device=device_obj)
     edges = mesh_edges(faces, device)
 
-    if sds_mode not in {"dummy", "none"} and optimize_mode != "part_scale":
-        raise NotImplementedError("Real SDS is currently enabled only for optimize_mode=part_scale")
+    if sds_mode not in {"dummy", "none"} and optimize_mode not in {"part_scale", "structure_scale"}:
+        raise NotImplementedError("Real SDS is currently enabled only for part_scale or structure_scale")
     renderer = CasTexOffsetRenderer(faces, uv_coords, face_uv_indices, render_resolution, device)
     guidance = CasTexSDSGuidance(geometry_prompt, negative_prompt, castex_root, stage=stage, device=device, guidance_scale=guidance_scale, fp16=fp16, mode=sds_mode)
     offset_mesh = DifferentiableOffsetMesh(vertices, faces, vertex_normals, vertex_uvs_per_vertex, fixed_zero_mask, max_vertex_offset, device=device)
@@ -153,11 +157,30 @@ def optimize_uv_offset_sds(
     }
     for name in PART_GROUPS:
         curves[f"scale_{name}"] = []
+    for name in COMPONENT_NAMES:
+        curves[f"structure_{name}"] = []
 
+    structure_tensors = None
+    structure_template_t = None
     if optimize_mode == "part_scale":
         raw_scale = torch.nn.Parameter(torch.zeros(len(PART_GROUPS), dtype=torch.float32, device=device_obj))
         optimizer = torch.optim.Adam([raw_scale], lr=lr)
         part_ids = _part_index(part_labels, device)
+        params = [raw_scale]
+    elif optimize_mode == "structure_scale":
+        if structure_component_maps is None or structure_template_weights is None:
+            raise ValueError("structure_scale requires structure_component_maps and structure_template_weights")
+        structure_tensors = {
+            name: torch.as_tensor(structure_component_maps[name], dtype=torch.float32, device=device_obj)[None, None]
+            for name in COMPONENT_NAMES
+        }
+        structure_template_t = torch.tensor(
+            [float(structure_template_weights.get(name, 0.0)) for name in COMPONENT_NAMES],
+            dtype=torch.float32,
+            device=device_obj,
+        )
+        raw_scale = torch.nn.Parameter(torch.full((len(COMPONENT_NAMES),), float(np.log(2.0)), dtype=torch.float32, device=device_obj))
+        optimizer = torch.optim.Adam([raw_scale], lr=lr)
         params = [raw_scale]
     elif optimize_mode == "lowres_uv":
         delta_low = torch.nn.Parameter(torch.zeros((1, 1, lowres_size, lowres_size), dtype=torch.float32, device=device_obj))
@@ -182,6 +205,15 @@ def optimize_uv_offset_sds(
             loss_reg = (part_scales - 1.0).square().mean()
             loss_tv = tv_loss(offset_uv)
             loss_mask = mask_loss(offset_uv, mask_t)
+        elif optimize_mode == "structure_scale":
+            offset_uv, structure_scales = compose_structured_offset_uv_torch(
+                structure_tensors, max_uv_t, mask_t, raw_scale, structure_template_t
+            )
+            vertices_offset, scale = offset_mesh.forward(offset_uv)
+            loss_reg = (structure_scales - 1.0).square().mean()
+            loss_tv = tv_loss(offset_uv)
+            loss_mask = mask_loss(offset_uv, mask_t)
+            part_scales = None
         else:
             offset_uv = compose_offset_uv_torch(init_uv_t, max_uv_t, mask_t, delta_low)
             vertices_offset, scale = offset_mesh.forward(offset_uv)
@@ -223,6 +255,9 @@ def optimize_uv_offset_sds(
         if optimize_mode == "part_scale":
             for index, name in enumerate(PART_GROUPS):
                 curves[f"scale_{name}"].append(float(part_scales[index].detach().cpu()))
+        if optimize_mode == "structure_scale":
+            for index, name in enumerate(COMPONENT_NAMES):
+                curves[f"structure_{name}"].append(float(structure_scales[index].detach().cpu()))
 
         final_offset_uv = offset_uv.detach()
         final_scale = scale.detach()
@@ -240,9 +275,13 @@ def optimize_uv_offset_sds(
                 param.data = torch.nan_to_num(param.data, nan=0.0, posinf=0.0, neginf=0.0)
 
     final_part_scales = {}
+    final_structure_scales = {}
     if optimize_mode == "part_scale":
         values = _part_scale_values(raw_scale).detach().cpu().numpy()
         final_part_scales = {name: float(values[index]) for index, name in enumerate(PART_GROUPS)}
+    if optimize_mode == "structure_scale":
+        values = (torch.sigmoid(raw_scale) * 1.5).detach().cpu().numpy()
+        final_structure_scales = {name: float(values[index]) for index, name in enumerate(COMPONENT_NAMES)}
 
     log = {
         "prompt": prompt,
@@ -253,6 +292,8 @@ def optimize_uv_offset_sds(
         "steps": steps,
         "loss_curves": curves,
         "final_part_scales": final_part_scales,
+        "final_structure_scales": final_structure_scales,
+        "structure_template_weights": structure_template_weights or {},
         "sds_mode": sds_mode,
     }
     return OffsetSDSResult(

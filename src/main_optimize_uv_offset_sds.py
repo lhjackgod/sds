@@ -19,6 +19,12 @@ from offset_map import rasterize_vertex_scalar_to_uv, save_offset_uv_png
 from offset_rules import build_offset_rules, load_offset_config
 from offset_sds.offset_map_torch import build_vertex_uvs_per_vertex
 from offset_sds.offset_sds_optimizer import optimize_uv_offset_sds
+from offset_structure.structured_offset_composer import (
+    build_structured_offset_basis,
+    compose_structured_offset_uv,
+    save_component_debug,
+)
+from offset_structure.template_bank import COMPONENT_NAMES
 from offset_shell import compute_vertex_normals, export_obj, export_offset_vertex_colors_ply
 from parse_prompt import parse_prompt
 from part_mapping import VertexMasks, build_vertex_masks
@@ -127,6 +133,17 @@ def run(args: argparse.Namespace) -> None:
     init_uv = rasterize_vertex_scalar_to_uv(init_scale, mesh.faces, mesh.uv_coords, mesh.face_uv_indices, resolution, mask_values=~rule_result.fixed_zero_mask)
     init_uv = np.clip(init_uv, 0.0, rule_result.uv_maps.max) * rule_result.uv_maps.garment_mask
 
+    structure_basis = build_structured_offset_basis(
+        mesh, vertex_masks, part_labels, spec, init_uv, rule_result.uv_maps.max, rule_result.uv_maps.garment_mask
+    )
+    unit_weights = {name: 1.0 for name in COMPONENT_NAMES}
+    _, structure_component_maps = compose_structured_offset_uv(structure_basis, unit_weights)
+    structured_template_uv, structured_template_maps = compose_structured_offset_uv(structure_basis, structure_basis.template_weights)
+    save_component_debug(structure_basis, structured_template_uv, out_dir)
+    if args.optimize_mode == "structure_scale" and not args.use_existing_init_for_structure:
+        init_uv = structured_template_uv
+        init_scale = init_scale.copy()
+
     normals = compute_vertex_normals(mesh.vertices, mesh.faces)
     init_vertices = mesh.vertices + normals * init_scale[:, None]
     export_obj(mesh, init_vertices, out_dir / "init_offset_mesh.obj")
@@ -177,6 +194,8 @@ def run(args: argparse.Namespace) -> None:
         lr=args.lr,
         vertex_colors=vertex_colors,
         fp16=args.fp16,
+        structure_component_maps=structure_component_maps,
+        structure_template_weights=structure_basis.template_weights,
     )
 
     out_mesh = MeshData(result.vertices, mesh.faces, mesh.uv_coords, mesh.face_uv_indices)
@@ -186,9 +205,22 @@ def run(args: argparse.Namespace) -> None:
     save_offset_uv_png(result.offset_uv, str(out_dir / "optimized_offset_scale_uv.png"), max_value=float(rule_result.uv_maps.max.max()))
     _save_offset_debug_texture(result.offset_uv, out_dir / "optimized_offset_debug_texture.png")
     export_offset_vertex_colors_ply(result.vertices, mesh.faces, vertex_masks, result.offset_scale, out_dir / "optimized_vertex_colors.ply")
-    Image.fromarray(render_shaded(result.vertices, mesh.faces, view="front", resolution=args.render_resolution)).save(out_dir / "optimized_render_shaded_front.png")
+    if args.optimize_mode == "structure_scale":
+        export_obj(mesh, result.vertices, out_dir / "structured_offset_mesh.obj")
+        with (out_dir / "component_weights.json").open("w", encoding="utf-8") as handle:
+            json.dump({
+                "template_weights": structure_basis.template_weights,
+                "final_structure_scales": result.log.get("final_structure_scales", {}),
+            }, handle, indent=2)
+    init_render = Image.fromarray(render_shaded(init_vertices, mesh.faces, view="front", resolution=args.render_resolution))
+    optimized_render = Image.fromarray(render_shaded(result.vertices, mesh.faces, view="front", resolution=args.render_resolution))
+    optimized_render.save(out_dir / "optimized_render_shaded_front.png")
     Image.fromarray(render_normals(result.vertices, mesh.faces, view="front", resolution=args.render_resolution)).save(out_dir / "optimized_render_normal_front.png")
     Image.fromarray(render_silhouette(result.vertices, mesh.faces, view="front", resolution=args.render_resolution)).save(out_dir / "optimized_render_silhouette_front.png")
+    before_after = Image.new("RGB", (init_render.width + optimized_render.width, init_render.height))
+    before_after.paste(init_render, (0, 0))
+    before_after.paste(optimized_render, (init_render.width, 0))
+    before_after.save(out_dir / "before_after_render.png")
 
     log = {**result.log, "init_offset_source": init_source, "offset_stats": _stats(result.offset_scale)}
     with (out_dir / "optimization_log.json").open("w", encoding="utf-8") as handle:
@@ -205,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-offset-dir", default=None)
     parser.add_argument("--castex-root", default="../CasTex")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--optimize-mode", choices=("part_scale", "lowres_uv"), default="part_scale")
+    parser.add_argument("--optimize-mode", choices=("part_scale", "lowres_uv", "structure_scale"), default="part_scale")
     parser.add_argument("--stage", choices=("i", "ii"), default="i")
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -216,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resolution", type=int)
     parser.add_argument("--lowres-size", type=int, default=64)
+    parser.add_argument("--use-existing-init-for-structure", action="store_true")
     parser.add_argument("--save-interval", type=int, default=50)
     parser.add_argument("--lambda-sds", type=float, default=1.0)
     parser.add_argument("--lambda-reg", type=float, default=100.0)
