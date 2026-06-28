@@ -203,3 +203,67 @@ GarmentSpec, mode, loss curves, final offset statistics, and part scale metadata
 /root/miniconda3/envs/castex/bin/python -m unittest discover -s tests -v
 ```
 
+
+## OpenCLIP Template Retrieval for Structure-aware Offset
+
+Structure-aware offset supports two template retrieval modes.
+
+1. Rule retrieval, the default:
+   It uses the parsed `GarmentSpec` garment type, such as hoodie, tshirt, jeans,
+   or leggings, to choose hand-authored structure templates. This path is stable
+   and has no extra dependency.
+
+2. OpenCLIP retrieval:
+   It uses the OpenCLIP text encoder to compare the input prompt against template
+   descriptions and blend the most relevant structure templates. OpenCLIP is not
+   a direct offset generator. It only maps:
+
+```text
+prompt -> template weights
+```
+
+The existing structured offset composer still maps:
+
+```text
+template weights + UV component maps -> UV offset map
+```
+
+Then optional CasTex SDS refines:
+
+```text
+structure scales -> nvdiffrast render closer to prompt
+```
+
+Install the optional dependency with:
+
+```bash
+pip install open_clip_torch
+```
+
+Example:
+
+```bash
+/root/miniconda3/envs/castex/bin/python src/main_optimize_uv_offset_sds.py \
+  --prompt "a person wearing a loose white hoodie and dark blue jeans" \
+  --mesh data/smplx/generated/smplx_template.obj \
+  --uv data/smplx/generated/uv_data.npz \
+  --part-labels data/smplx/generated/part_labels.json \
+  --mask-dir outputs/masks/prompt_batch_512/04_a_person_wearing_a_white_hoodie_and_dark_jeans \
+  --castex-root ../CasTex \
+  --out outputs/offset_sds/hoodie_jeans_openclip_structure \
+  --optimize-mode structure_scale \
+  --template-retrieval openclip \
+  --openclip-model ViT-B-32 \
+  --openclip-pretrained laion2b_s34b_b79k \
+  --openclip-top-k 3 \
+  --stage i \
+  --steps 100 \
+  --batch-size 1 \
+  --render-resolution 256 \
+  --guidance-scale 15 \
+  --device cuda:0
+```
+
+The run saves `structure_template_weights.json` and
+`structure_template_debug.json` so you can inspect which templates were selected
+and how their component weights were blended.

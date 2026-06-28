@@ -7,6 +7,8 @@ from pathlib import Path
 
 import torch
 
+from progress_log import append_progress
+
 
 class CasTexSDSGuidance:
     def __init__(
@@ -21,6 +23,7 @@ class CasTexSDSGuidance:
         model_ii: str = "DeepFloyd/IF-II-L-v1.0",
         fp16: bool = True,
         mode: str = "dummy",
+        progress_log_path=None,
     ) -> None:
         self.prompt = prompt
         self.negative_prompt = negative_prompt
@@ -29,24 +32,30 @@ class CasTexSDSGuidance:
         self.guidance_scale = guidance_scale
         self.mode = mode
         self.fp16 = fp16
+        self.progress_log_path = progress_log_path
         self.backend = None
+        append_progress(progress_log_path, "sds guidance: init", {"mode": mode, "stage": stage, "device": device})
         if stage != "i":
             raise NotImplementedError('Only stage="i" is wired for the first offset SDS pass')
         if mode in {"dummy", "none"}:
+            append_progress(progress_log_path, "sds guidance: dummy mode ready")
             return
 
         root = Path(castex_root).resolve()
+        append_progress(progress_log_path, "sds guidance: loading CasTex modules", {"castex_root": str(root)})
         sys.path.insert(0, str(root))
         try:
             from src.guidance import SDSLoss  # type: ignore
             from src.prompt_processing import encode_prompt  # type: ignore
 
             model_name = model_i if stage == "i" else model_ii
+            append_progress(progress_log_path, "sds guidance: loading SDSLoss", {"model_name": model_name})
             self.backend = SDSLoss(stage=stage, model_name=model_name, device=device)
             self.backend.eval()
             for parameter in self.backend.parameters():
                 parameter.requires_grad_(False)
             cache_dir = root / "cached_prompts"
+            append_progress(progress_log_path, "sds guidance: encoding/loading prompt embeddings", {"cache_dir": str(cache_dir)})
             self.prompt_embeddings = encode_prompt(
                 prompt,
                 directional=False,
@@ -54,7 +63,9 @@ class CasTexSDSGuidance:
                 cache_dir=str(cache_dir),
                 device=device,
             )
+            append_progress(progress_log_path, "sds guidance: ready")
         except Exception as exc:
+            append_progress(progress_log_path, "sds guidance: failed", {"error": str(exc)})
             raise RuntimeError(
                 "Could not initialize CasTex SDS. Use --sds-mode dummy to validate the differentiable offset pipeline."
             ) from exc

@@ -17,6 +17,7 @@ from offset_sds.offset_map_torch import compose_offset_uv_torch, tv_loss
 from offset_sds.offset_mesh_torch import DifferentiableOffsetMesh
 from offset_structure.structured_offset_composer import compose_structured_offset_uv_torch
 from offset_structure.template_bank import COMPONENT_NAMES
+from progress_log import append_progress
 
 
 PART_GROUPS = {
@@ -125,6 +126,7 @@ def optimize_uv_offset_sds(
     fp16: bool = True,
     structure_component_maps: dict[str, np.ndarray] | None = None,
     structure_template_weights: dict[str, float] | None = None,
+    progress_log_path=None,
 ) -> OffsetSDSResult:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -139,10 +141,25 @@ def optimize_uv_offset_sds(
     normals_t = torch.as_tensor(vertex_normals, dtype=torch.float32, device=device_obj)
     edges = mesh_edges(faces, device)
 
+    append_progress(progress_log_path, "optimizer: init", {"mode": optimize_mode, "steps": steps, "sds_mode": sds_mode, "device": device})
     if sds_mode not in {"dummy", "none"} and optimize_mode not in {"part_scale", "structure_scale"}:
         raise NotImplementedError("Real SDS is currently enabled only for part_scale or structure_scale")
+    append_progress(progress_log_path, "optimizer: creating nvdiffrast renderer", {"resolution": render_resolution})
     renderer = CasTexOffsetRenderer(faces, uv_coords, face_uv_indices, render_resolution, device)
-    guidance = CasTexSDSGuidance(geometry_prompt, negative_prompt, castex_root, stage=stage, device=device, guidance_scale=guidance_scale, fp16=fp16, mode=sds_mode)
+    append_progress(progress_log_path, "optimizer: renderer ready")
+    append_progress(progress_log_path, "optimizer: creating SDS guidance")
+    guidance = CasTexSDSGuidance(
+        geometry_prompt,
+        negative_prompt,
+        castex_root,
+        stage=stage,
+        device=device,
+        guidance_scale=guidance_scale,
+        fp16=fp16,
+        mode=sds_mode,
+        progress_log_path=progress_log_path,
+    )
+    append_progress(progress_log_path, "optimizer: SDS guidance ready")
     offset_mesh = DifferentiableOffsetMesh(vertices, faces, vertex_normals, vertex_uvs_per_vertex, fixed_zero_mask, max_vertex_offset, device=device)
 
     curves: dict[str, list[float]] = {
@@ -163,11 +180,13 @@ def optimize_uv_offset_sds(
     structure_tensors = None
     structure_template_t = None
     if optimize_mode == "part_scale":
+        append_progress(progress_log_path, "optimizer: initializing part_scale parameters")
         raw_scale = torch.nn.Parameter(torch.zeros(len(PART_GROUPS), dtype=torch.float32, device=device_obj))
         optimizer = torch.optim.Adam([raw_scale], lr=lr)
         part_ids = _part_index(part_labels, device)
         params = [raw_scale]
     elif optimize_mode == "structure_scale":
+        append_progress(progress_log_path, "optimizer: initializing structure_scale parameters", {"template_weights": structure_template_weights or {}})
         if structure_component_maps is None or structure_template_weights is None:
             raise ValueError("structure_scale requires structure_component_maps and structure_template_weights")
         structure_tensors = {
@@ -183,6 +202,7 @@ def optimize_uv_offset_sds(
         optimizer = torch.optim.Adam([raw_scale], lr=lr)
         params = [raw_scale]
     elif optimize_mode == "lowres_uv":
+        append_progress(progress_log_path, "optimizer: initializing lowres_uv parameters", {"lowres_size": lowres_size})
         delta_low = torch.nn.Parameter(torch.zeros((1, 1, lowres_size, lowres_size), dtype=torch.float32, device=device_obj))
         optimizer = torch.optim.Adam([delta_low], lr=lr)
         params = [delta_low]
@@ -193,6 +213,7 @@ def optimize_uv_offset_sds(
     final_scale = init_scale_t
     final_vertices = base_vertices_t
 
+    append_progress(progress_log_path, "optimizer: loop start")
     for step in range(max(steps, 0) + 1):
         optimizer.zero_grad(set_to_none=True)
         if optimize_mode == "part_scale":
@@ -259,12 +280,30 @@ def optimize_uv_offset_sds(
             for index, name in enumerate(COMPONENT_NAMES):
                 curves[f"structure_{name}"].append(float(structure_scales[index].detach().cpu()))
 
+        if step == 0 or step == steps or (save_interval > 0 and step % save_interval == 0):
+            progress_data = {
+                "step": step,
+                "steps": steps,
+                "loss_sds": float(loss_sds.detach().cpu()),
+                "loss_reg": float(loss_reg.detach().cpu()),
+                "loss_lap": float(loss_lap.detach().cpu()),
+                "loss_total": float(loss.detach().cpu()),
+                "mean_offset": float(scale.mean().detach().cpu()),
+                "max_offset": float(scale.max().detach().cpu()),
+            }
+            if optimize_mode == "part_scale":
+                progress_data["part_scales"] = {name: float(part_scales[index].detach().cpu()) for index, name in enumerate(PART_GROUPS)}
+            if optimize_mode == "structure_scale":
+                progress_data["structure_scales"] = {name: float(structure_scales[index].detach().cpu()) for index, name in enumerate(COMPONENT_NAMES)}
+            append_progress(progress_log_path, "optimizer: step", progress_data)
+
         final_offset_uv = offset_uv.detach()
         final_scale = scale.detach()
         final_vertices = vertices_offset.detach()
 
         if save_interval > 0 and (step % save_interval == 0 or step == steps):
             _save_debug(out_path, step, renderer, vertices_offset, offset_uv, render_resolution, device, vertex_colors=vertex_colors)
+            append_progress(progress_log_path, "optimizer: wrote step debug files", {"step": step, "dir": str(out_path)})
 
         if step == steps:
             break
@@ -282,6 +321,8 @@ def optimize_uv_offset_sds(
     if optimize_mode == "structure_scale":
         values = (torch.sigmoid(raw_scale) * 1.5).detach().cpu().numpy()
         final_structure_scales = {name: float(values[index]) for index, name in enumerate(COMPONENT_NAMES)}
+
+    append_progress(progress_log_path, "optimizer: complete")
 
     log = {
         "prompt": prompt,

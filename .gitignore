@@ -5,3 +5,4 @@ outputs/*
 
 data/smplx/source/*
 data/smplx/generated/*
+models/

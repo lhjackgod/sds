@@ -16,12 +16,11 @@ cd /autodl-fs/data/llmtexture/step2
   --part-labels data/smplx/generated/part_labels.json \
   --mask-dir outputs/masks/prompt_batch_512/04_a_person_wearing_a_white_hoodie_and_dark_jeans \
   --castex-root ../CasTex \
-  --out outputs/offset_structure/hoodie_jeans_structure_sds \
+  --out outputs/offset_sds/hoodie_jeans_openclip_structure \
   --optimize-mode structure_scale \
+  --template-retrieval openclip \
+  --openclip-model ViT-B-32 \
+  --openclip-pretrained models/openclip/CLIP-ViT-B-32-laion2B-s34B-b79K/open_clip_model.safetensors \
+  --openclip-top-k 3 \
   --stage i \
-  --steps 100 \
-  --batch-size 1 \
-  --render-resolution 256 \
-  --guidance-scale 15 \
-  --device cuda:0 \
-  --save-interval 20
+  --device cuda:0

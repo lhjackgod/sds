@@ -28,6 +28,7 @@ from offset_structure.template_bank import COMPONENT_NAMES
 from offset_shell import compute_vertex_normals, export_obj, export_offset_vertex_colors_ply
 from parse_prompt import parse_prompt
 from part_mapping import VertexMasks, build_vertex_masks
+from progress_log import append_progress
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -109,52 +110,93 @@ def _stats(offset_scale: np.ndarray) -> dict:
 def run(args: argparse.Namespace) -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    progress_log_path = out_dir / "run_progress.log"
+    append_progress(progress_log_path, "main: start", {"args": vars(args)})
     mask_dir = Path(args.mask_dir)
     init_dir = Path(args.init_offset_dir) if args.init_offset_dir else None
 
+    append_progress(progress_log_path, "main: loading configs")
     with Path(args.garment_config).open("r", encoding="utf-8") as handle:
         garment_config = yaml.safe_load(handle) or {}
     offset_config = load_offset_config(args.offset_config)
 
+    append_progress(progress_log_path, "main: parsing prompt", {"prompt": args.prompt})
     spec = parse_prompt(args.prompt)
+    append_progress(progress_log_path, "main: loading mesh", {"mesh": args.mesh, "uv": args.uv})
     mesh = load_smplx(args.mesh, args.uv)
+    append_progress(progress_log_path, "main: mesh loaded", {"vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces))})
     part_labels = load_part_labels(args.part_labels, len(mesh.vertices))
+    append_progress(progress_log_path, "main: loading/building vertex masks", {"mask_dir": str(mask_dir)})
     vertex_masks = _load_vertex_masks(mask_dir)
     if vertex_masks is None:
         vertex_masks = build_vertex_masks(spec, part_labels, mesh.vertices, body_up_axis=garment_config.get("body_up_axis", "y"))
+        append_progress(progress_log_path, "main: vertex masks built from labels")
+    else:
+        append_progress(progress_log_path, "main: vertex masks loaded")
 
     resolution = args.resolution
     if resolution is None and (mask_dir / "upper_mask.png").exists():
         resolution = int(Image.open(mask_dir / "upper_mask.png").size[0])
     resolution = resolution or 1024
 
+    append_progress(progress_log_path, "main: building rule offset", {"resolution": resolution})
     rule_result = build_offset_rules(spec, part_labels, vertex_masks, mesh, offset_config, resolution=resolution)
     init_scale, init_source = _load_init_scale(init_dir, mesh, rule_result.vertex_init)
+    append_progress(progress_log_path, "main: init scale ready", {"source": init_source})
     init_uv = rasterize_vertex_scalar_to_uv(init_scale, mesh.faces, mesh.uv_coords, mesh.face_uv_indices, resolution, mask_values=~rule_result.fixed_zero_mask)
     init_uv = np.clip(init_uv, 0.0, rule_result.uv_maps.max) * rule_result.uv_maps.garment_mask
 
+    append_progress(progress_log_path, "main: building structured offset basis", {"template_retrieval": args.template_retrieval})
     structure_basis = build_structured_offset_basis(
-        mesh, vertex_masks, part_labels, spec, init_uv, rule_result.uv_maps.max, rule_result.uv_maps.garment_mask
+        mesh,
+        vertex_masks,
+        part_labels,
+        spec,
+        init_uv,
+        rule_result.uv_maps.max,
+        rule_result.uv_maps.garment_mask,
+        prompt=args.prompt,
+        template_retrieval=args.template_retrieval,
+        openclip_model=args.openclip_model,
+        openclip_pretrained=args.openclip_pretrained,
+        openclip_device=args.openclip_device,
+        openclip_top_k=args.openclip_top_k,
+        openclip_temperature=args.openclip_temperature,
+        progress_log_path=progress_log_path,
     )
+    append_progress(progress_log_path, "main: writing structure template debug files")
+    with (out_dir / "structure_template_weights.json").open("w", encoding="utf-8") as handle:
+        json.dump(structure_basis.template_weights, handle, indent=2)
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "structure_template_weights.json")})
+    with (out_dir / "structure_template_debug.json").open("w", encoding="utf-8") as handle:
+        json.dump(structure_basis.template_debug_info, handle, indent=2)
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "structure_template_debug.json")})
     unit_weights = {name: 1.0 for name in COMPONENT_NAMES}
     _, structure_component_maps = compose_structured_offset_uv(structure_basis, unit_weights)
     structured_template_uv, structured_template_maps = compose_structured_offset_uv(structure_basis, structure_basis.template_weights)
+    append_progress(progress_log_path, "main: saving structure component debug images")
     save_component_debug(structure_basis, structured_template_uv, out_dir)
+    append_progress(progress_log_path, "main: wrote structure debug images", {"dir": str(out_dir)})
     if args.optimize_mode == "structure_scale" and not args.use_existing_init_for_structure:
         init_uv = structured_template_uv
         init_scale = init_scale.copy()
 
+    append_progress(progress_log_path, "main: computing normals and writing init outputs")
     normals = compute_vertex_normals(mesh.vertices, mesh.faces)
     init_vertices = mesh.vertices + normals * init_scale[:, None]
     export_obj(mesh, init_vertices, out_dir / "init_offset_mesh.obj")
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "init_offset_mesh.obj")})
     np.save(out_dir / "init_offset_scale.npy", init_scale.astype(np.float32))
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "init_offset_scale.npy")})
     save_offset_uv_png(init_uv, str(out_dir / "init_offset_scale_uv.png"), max_value=float(rule_result.uv_maps.max.max()))
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "init_offset_scale_uv.png")})
     vertex_uvs = build_vertex_uvs_per_vertex(len(mesh.vertices), mesh.faces, mesh.uv_coords, mesh.face_uv_indices)
     geometry_prompt = build_geometry_prompt(args.prompt)
     negative_prompt = build_negative_prompt()
 
     vertex_colors = build_prompt_vertex_colors(vertex_masks, spec)
 
+    append_progress(progress_log_path, "main: starting optimizer")
     result = optimize_uv_offset_sds(
         vertices=mesh.vertices,
         faces=mesh.faces,
@@ -196,22 +238,34 @@ def run(args: argparse.Namespace) -> None:
         fp16=args.fp16,
         structure_component_maps=structure_component_maps,
         structure_template_weights=structure_basis.template_weights,
+        progress_log_path=progress_log_path,
     )
+    append_progress(progress_log_path, "main: optimizer returned")
 
+    append_progress(progress_log_path, "main: writing optimized outputs")
     out_mesh = MeshData(result.vertices, mesh.faces, mesh.uv_coords, mesh.face_uv_indices)
     export_obj(mesh, result.vertices, out_dir / "optimized_offset_mesh.obj")
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "optimized_offset_mesh.obj")})
     np.save(out_dir / "optimized_offset_scale.npy", result.offset_scale)
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "optimized_offset_scale.npy")})
     np.save(out_dir / "optimized_offset_scale_uv.npy", result.offset_uv)
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "optimized_offset_scale_uv.npy")})
     save_offset_uv_png(result.offset_uv, str(out_dir / "optimized_offset_scale_uv.png"), max_value=float(rule_result.uv_maps.max.max()))
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "optimized_offset_scale_uv.png")})
     _save_offset_debug_texture(result.offset_uv, out_dir / "optimized_offset_debug_texture.png")
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "optimized_offset_debug_texture.png")})
     export_offset_vertex_colors_ply(result.vertices, mesh.faces, vertex_masks, result.offset_scale, out_dir / "optimized_vertex_colors.ply")
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "optimized_vertex_colors.ply")})
     if args.optimize_mode == "structure_scale":
         export_obj(mesh, result.vertices, out_dir / "structured_offset_mesh.obj")
+        append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "structured_offset_mesh.obj")})
         with (out_dir / "component_weights.json").open("w", encoding="utf-8") as handle:
             json.dump({
                 "template_weights": structure_basis.template_weights,
+                "template_debug_info": structure_basis.template_debug_info,
                 "final_structure_scales": result.log.get("final_structure_scales", {}),
             }, handle, indent=2)
+        append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "component_weights.json")})
     init_render = Image.fromarray(render_shaded(init_vertices, mesh.faces, view="front", resolution=args.render_resolution))
     optimized_render = Image.fromarray(render_shaded(result.vertices, mesh.faces, view="front", resolution=args.render_resolution))
     optimized_render.save(out_dir / "optimized_render_shaded_front.png")
@@ -221,10 +275,19 @@ def run(args: argparse.Namespace) -> None:
     before_after.paste(init_render, (0, 0))
     before_after.paste(optimized_render, (init_render.width, 0))
     before_after.save(out_dir / "before_after_render.png")
+    append_progress(progress_log_path, "main: wrote render previews", {"dir": str(out_dir)})
 
-    log = {**result.log, "init_offset_source": init_source, "offset_stats": _stats(result.offset_scale)}
+    log = {
+        **result.log,
+        "init_offset_source": init_source,
+        "template_retrieval_method": args.template_retrieval,
+        "template_retrieval_debug": structure_basis.template_debug_info,
+        "offset_stats": _stats(result.offset_scale),
+    }
     with (out_dir / "optimization_log.json").open("w", encoding="utf-8") as handle:
         json.dump(log, handle, indent=2)
+    append_progress(progress_log_path, "main: wrote file", {"path": str(out_dir / "optimization_log.json")})
+    append_progress(progress_log_path, "main: complete", {"optimization_log": str(out_dir / "optimization_log.json")})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -249,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution", type=int)
     parser.add_argument("--lowres-size", type=int, default=64)
     parser.add_argument("--use-existing-init-for-structure", action="store_true")
+    parser.add_argument("--template-retrieval", choices=("rule", "openclip"), default="rule")
+    parser.add_argument("--openclip-model", default="ViT-B-32")
+    parser.add_argument("--openclip-pretrained", default="laion2b_s34b_b79k")
+    parser.add_argument("--openclip-top-k", type=int, default=3)
+    parser.add_argument("--openclip-temperature", type=float, default=0.07)
+    parser.add_argument("--openclip-device", default="cuda:0")
     parser.add_argument("--save-interval", type=int, default=50)
     parser.add_argument("--lambda-sds", type=float, default=1.0)
     parser.add_argument("--lambda-reg", type=float, default=100.0)

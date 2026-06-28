@@ -13,6 +13,7 @@ from offset_structure.overlap_fields import OverlapFields, build_overlap_fields
 from offset_structure.seam_fields import SeamFields, build_seam_fields
 from offset_structure.template_bank import COMPONENT_NAMES
 from offset_structure.template_retrieval import retrieve_structure_template
+from progress_log import append_progress
 from offset_structure.wrinkle_fields import WrinkleFields, build_wrinkle_fields
 
 
@@ -26,6 +27,7 @@ class StructuredOffsetBasis:
     overlap: OverlapFields
     wrinkles: WrinkleFields
     template_weights: dict[str, float]
+    template_debug_info: dict
     components: dict[str, np.ndarray]
 
 
@@ -37,13 +39,43 @@ def _norm(component: np.ndarray) -> np.ndarray:
     return np.clip(value, 0.0, 1.0)
 
 
-def build_structured_offset_basis(mesh, vertex_masks, part_labels, spec: dict, init_uv: np.ndarray, max_uv: np.ndarray, garment_mask_uv: np.ndarray) -> StructuredOffsetBasis:
+def build_structured_offset_basis(
+    mesh,
+    vertex_masks,
+    part_labels,
+    spec: dict,
+    init_uv: np.ndarray,
+    max_uv: np.ndarray,
+    garment_mask_uv: np.ndarray,
+    prompt: str | None = None,
+    template_retrieval: str = "rule",
+    openclip_model: str = "ViT-B-32",
+    openclip_pretrained: str = "laion2b_s34b_b79k",
+    openclip_device: str = "cuda:0",
+    openclip_top_k: int = 3,
+    openclip_temperature: float = 0.07,
+    progress_log_path=None,
+) -> StructuredOffsetBasis:
     resolution = int(init_uv.shape[0])
+    append_progress(progress_log_path, "structure basis: building boundary fields", {"resolution": resolution})
     boundary = build_boundary_fields(mesh, None, vertex_masks, part_labels, resolution)
+    append_progress(progress_log_path, "structure basis: building seam fields")
     seams = build_seam_fields(mesh, None, vertex_masks, part_labels, resolution)
+    append_progress(progress_log_path, "structure basis: building overlap fields")
     overlap = build_overlap_fields(boundary, garment_mask_uv, vertex_masks, part_labels)
+    append_progress(progress_log_path, "structure basis: building wrinkle fields")
     wrinkles = build_wrinkle_fields(spec, vertex_masks, garment_mask_uv)
-    template = retrieve_structure_template(spec)
+    template, template_debug = retrieve_structure_template(
+        spec,
+        prompt=prompt,
+        method=template_retrieval,
+        openclip_model=openclip_model,
+        openclip_pretrained=openclip_pretrained,
+        device=openclip_device,
+        top_k=openclip_top_k,
+        temperature=openclip_temperature,
+        progress_log_path=progress_log_path,
+    )
 
     boundary_map = np.maximum.reduce([
         boundary.neck_band_uv,
@@ -76,6 +108,7 @@ def build_structured_offset_basis(mesh, vertex_masks, part_labels, spec: dict, i
         "overlap": _norm(overlap_map),
         "boundary_debug": _norm(boundary_map),
     }
+    append_progress(progress_log_path, "structure basis: complete", {"template_weights": template})
     return StructuredOffsetBasis(
         base_uv=init_uv.astype(np.float32),
         max_uv=max_uv.astype(np.float32),
@@ -85,6 +118,7 @@ def build_structured_offset_basis(mesh, vertex_masks, part_labels, spec: dict, i
         overlap=overlap,
         wrinkles=wrinkles,
         template_weights=template,
+        template_debug_info=template_debug,
         components=components,
     )
 
